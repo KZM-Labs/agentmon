@@ -22,6 +22,33 @@ final class SessionStore: ObservableObject {
     init(projectsDir: URL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/projects")) {
         self.projectsDir = projectsDir
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        loadPersistedState()
+    }
+
+    // MARK: - Persistence
+
+    private static var stateFile: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("Agentmon", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("state.json")
+    }
+
+    private func loadPersistedState() {
+        guard let data = try? Data(contentsOf: Self.stateFile) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let decoded = try? decoder.decode([Session].self, from: data) else { return }
+        // Only keep sessions whose JSONL file still exists — pruned files mean stale offsets
+        let fm = FileManager.default
+        sessions = decoded.filter { fm.fileExists(atPath: $0.filePath) }
+    }
+
+    private func persistState() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(sessions) else { return }
+        try? data.write(to: Self.stateFile, options: .atomic)
     }
 
     func start() {
@@ -50,17 +77,23 @@ final class SessionStore: ObservableObject {
 
     var liveSessions: [Session] {
         sessions
-            .filter { $0.state != .stale }
+            .filter { $0.state != .stale && !Preferences.shared.isMuted($0.cwd) }
             .sorted { $0.lastActivity > $1.lastActivity }
     }
 
     var recentSessions: [Session] {
         let cutoff = Date().addingTimeInterval(-86_400)
         return sessions
-            .filter { $0.state == .stale && $0.lastActivity > cutoff }
+            .filter { $0.state == .stale && $0.lastActivity > cutoff && !Preferences.shared.isMuted($0.cwd) }
             .sorted { $0.lastActivity > $1.lastActivity }
             .prefix(10)
             .map { $0 }
+    }
+
+    /// All distinct cwds we've ever observed — used by Preferences to list mute targets.
+    var knownProjects: [String] {
+        let cwds = Set(sessions.compactMap { $0.cwd })
+        return cwds.sorted()
     }
 
     var totalUsage: TokenUsage {
@@ -77,14 +110,12 @@ final class SessionStore: ObservableObject {
     private func checkIdleAlerts() {
         guard let cb = onIdleAlert else { return }
         let now = Date()
-        for s in sessions {
+        for s in sessions where !Preferences.shared.isMuted(s.cwd) {
             let age = now.timeIntervalSince(s.lastActivity)
-            // Fire when between threshold and threshold+10s, dedupe per session
             if age >= idleThreshold && age < idleThreshold + 30 && !alertedSessions.contains(s.id) {
                 alertedSessions.insert(s.id)
                 cb(s)
             }
-            // Reset dedupe if the session becomes active again
             if age < 30 {
                 alertedSessions.remove(s.id)
             }
@@ -113,6 +144,7 @@ final class SessionStore: ObservableObject {
 
         sessions = updated
         lastScan = Date()
+        persistState()
     }
 
     private func ingestFile(_ file: URL, into sessions: inout [Session], idx: inout [String: Int]) {

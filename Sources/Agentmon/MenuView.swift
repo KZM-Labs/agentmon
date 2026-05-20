@@ -12,7 +12,7 @@ struct MenuView: View {
             header
             Divider()
             if showingPreferences {
-                PreferencesPane(prefs: prefs, hookStatus: $hookStatus, dismiss: { showingPreferences = false })
+                PreferencesPane(prefs: prefs, store: store, hookStatus: $hookStatus, dismiss: { showingPreferences = false })
             } else {
                 sessionList
             }
@@ -119,73 +119,127 @@ struct MenuView: View {
 
 struct PreferencesPane: View {
     @ObservedObject var prefs: Preferences
+    @ObservedObject var store: SessionStore
     @Binding var hookStatus: String?
     let dismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            row(label: "Notifications") {
-                Toggle("", isOn: $prefs.notificationsEnabled)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Idle threshold")
-                        .font(.system(size: 11, weight: .medium))
-                    Spacer()
-                    Text("\(Int(prefs.idleThresholdMinutes)) min")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .monospacedDigit()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                row(label: "Notifications") {
+                    Toggle("", isOn: $prefs.notificationsEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
                 }
-                Slider(value: $prefs.idleThresholdMinutes, in: 5...120, step: 5)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Idle threshold")
+                            .font(.system(size: 11, weight: .medium))
+                        Spacer()
+                        Text("\(Int(prefs.idleThresholdMinutes)) min")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
+                    Slider(value: $prefs.idleThresholdMinutes, in: 5...120, step: 5)
+                }
+
+                row(label: "Show cost estimate") {
+                    Toggle("", isOn: $prefs.showCost)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+
+                Divider()
+
+                projectsSection
+
+                Divider()
+
+                hookSection
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
+        }
+        .frame(maxHeight: 480)
+    }
 
-            row(label: "Show cost estimate") {
-                Toggle("", isOn: $prefs.showCost)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("HOOK INTEGRATION")
-                    .font(.system(size: 9, weight: .semibold))
-                    .tracking(0.8)
-                    .foregroundColor(.secondary)
-                Text("Push events drop update latency from ~2s to ~50ms. Writes to ~/.claude/settings.json with a .bak backup.")
+    @ViewBuilder
+    private var projectsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("PROJECTS")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.8)
+                .foregroundColor(.secondary)
+            if store.knownProjects.isEmpty {
+                Text("No projects observed yet.")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button("Install Hooks") {
-                        let r = HookInstaller.install()
-                        if let err = r.error {
-                            hookStatus = "Error: \(err)"
-                        } else if r.alreadyPresent {
-                            hookStatus = "Already installed."
-                        } else {
-                            hookStatus = "Installed. Restart Claude Code to activate."
-                        }
+            } else {
+                Text("Mute a project to hide its sessions and suppress notifications.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                ForEach(store.knownProjects, id: \.self) { cwd in
+                    HStack {
+                        Text(displayPath(cwd))
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { !prefs.mutedProjects.contains(cwd) },
+                            set: { _ in prefs.toggleMute(cwd) }
+                        ))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .controlSize(.small)
                     }
-                    Button("Uninstall") {
-                        let ok = HookInstaller.uninstall()
-                        hookStatus = ok ? "Uninstalled." : "Could not modify settings.json."
-                    }
-                    .buttonStyle(.bordered)
-                }
-                if let s = hookStatus {
-                    Text(s)
-                        .font(.system(size: 10))
-                        .foregroundColor(s.hasPrefix("Error") ? .red : .secondary)
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 14)
+    }
+
+    @ViewBuilder
+    private var hookSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("HOOK INTEGRATION")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.8)
+                .foregroundColor(.secondary)
+            Text("Push events drop update latency from ~2s to ~50ms. Writes to ~/.claude/settings.json with a .bak backup.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Install Hooks") {
+                    let r = HookInstaller.install()
+                    if let err = r.error {
+                        hookStatus = "Error: \(err)"
+                    } else if r.alreadyPresent {
+                        hookStatus = "Already installed."
+                    } else {
+                        hookStatus = "Installed. Restart Claude Code to activate."
+                    }
+                }
+                Button("Uninstall") {
+                    let ok = HookInstaller.uninstall()
+                    hookStatus = ok ? "Uninstalled." : "Could not modify settings.json."
+                }
+                .buttonStyle(.bordered)
+            }
+            if let s = hookStatus {
+                Text(s)
+                    .font(.system(size: 10))
+                    .foregroundColor(s.hasPrefix("Error") ? .red : .secondary)
+            }
+        }
+    }
+
+    private func displayPath(_ p: String) -> String {
+        let home = NSHomeDirectory()
+        if p.hasPrefix(home) { return "~" + p.dropFirst(home.count) }
+        return p
     }
 
     private func row<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {

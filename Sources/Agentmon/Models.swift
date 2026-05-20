@@ -6,7 +6,7 @@ enum SessionState: String {
     case stale    // >5min but <24h
 }
 
-struct TokenUsage: Equatable {
+struct TokenUsage: Equatable, Codable {
     var inputTokens: Int = 0
     var outputTokens: Int = 0
     var cacheCreate: Int = 0
@@ -24,7 +24,7 @@ struct TokenUsage: Equatable {
     }
 }
 
-struct Session: Identifiable, Equatable {
+struct Session: Identifiable, Equatable, Codable {
     let id: String              // sessionId UUID
     var cwd: String?
     var model: String?          // e.g. claude-opus-4-7
