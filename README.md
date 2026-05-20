@@ -95,14 +95,18 @@ The hook server binds to all interfaces because `NWListener` doesn't expose a bi
 
 Status bar icon priority: `waiting` > `active` > `idle`. The blue dot is the "you have work to do" signal.
 
-## v0.5+ roadmap
+## v0.5 scope (shipped)
 
-- [ ] Show current tool name (parse `tool_use` block from last assistant message)
+- [x] **Tool tracking** — parses `tool_use`/`tool_result` blocks from `message.content`. Shows `→ ToolName` in the row when a tool is in flight.
+- [x] **Smarter state machine** — sessions with a pending tool stay in `.active`, not `.waiting`, so the "your turn" signal is honest. Pending tools >10 min are TTL-pruned to guard against silent leaks.
+
+## v0.6+ roadmap
+
 - [ ] Cross-project daily budget alert ("$20 spent today across all sessions")
 - [ ] Astro companion dashboard for big-screen view (same data source over `:7842`)
 - [ ] Spotlight integration for session search
 - [ ] Activity sparkline per session
-- [ ] Detect "stuck on tool" — assistant called a tool that's never returned
+- [ ] Stuck-tool detection (tool pending >2 min surfaces as warning)
 
 ## Requirements
 

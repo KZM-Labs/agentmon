@@ -36,12 +36,28 @@ struct Session: Identifiable, Equatable, Codable {
     var fileOffset: UInt64
     var messageCount: Int
     var usage: TokenUsage = TokenUsage()
+    /// tool_use_id → tool name, populated when assistant emits tool_use,
+    /// cleared when user line carries the matching tool_result.
+    var pendingTools: [String: String] = [:]
+    /// Track when each pending tool started (for "stuck on tool" UX later).
+    var pendingToolStartedAt: [String: Date] = [:]
+
+    /// The most recently dispatched tool that hasn't yet returned a tool_result.
+    var currentTool: String? {
+        // Pick the tool whose start time is latest
+        let latest = pendingToolStartedAt.max(by: { $0.value < $1.value })
+        guard let id = latest?.key else { return nil }
+        return pendingTools[id]
+    }
 
     var state: SessionState {
         let age = Date().timeIntervalSince(lastActivity)
-        // assistant finished its turn + a few seconds gone by = waiting on user.
-        // The harness writes the user's next message immediately on send, so a
-        // sustained assistant-typed tail means the user hasn't replied yet.
+        // If a tool is mid-flight, the session is working — not waiting on user
+        if !pendingTools.isEmpty {
+            if age < 300 { return .active }
+            return .idle  // tool stalled out
+        }
+        // Assistant typed last + a few seconds passed = waiting on user input
         if lastEventType == "assistant" && age >= 5 && age < 1_800 {
             return .waiting
         }
@@ -80,6 +96,21 @@ struct JSONLine: Decodable {
     struct MessageStub: Decodable {
         let model: String?
         let usage: UsageStub?
+        let content: [ContentBlock]?
+
+        // message.content is polymorphic: array of blocks OR plain string.
+        // We only care about tool_use / tool_result blocks; ignore everything else.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            model = try c.decodeIfPresent(String.self, forKey: .model)
+            usage = try c.decodeIfPresent(UsageStub.self, forKey: .usage)
+            if let arr = try? c.decode([ContentBlock].self, forKey: .content) {
+                content = arr
+            } else {
+                content = nil
+            }
+        }
+        enum CodingKeys: String, CodingKey { case model, usage, content }
     }
 
     struct UsageStub: Decodable {
@@ -87,6 +118,14 @@ struct JSONLine: Decodable {
         let output_tokens: Int?
         let cache_creation_input_tokens: Int?
         let cache_read_input_tokens: Int?
+    }
+
+    /// Minimal block representation. Unknown block types decode with `type` only.
+    struct ContentBlock: Decodable {
+        let type: String?
+        let name: String?           // tool_use
+        let id: String?             // tool_use
+        let tool_use_id: String?    // tool_result
     }
 }
 

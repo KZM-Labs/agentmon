@@ -177,6 +177,8 @@ final class SessionStore: ObservableObject {
         let existingOffset = idx[sessionId].map { sessions[$0].fileOffset } ?? 0
         let existingCount = idx[sessionId].map { sessions[$0].messageCount } ?? 0
         let existingUsage = idx[sessionId].map { sessions[$0].usage } ?? TokenUsage()
+        var pendingTools = idx[sessionId].map { sessions[$0].pendingTools } ?? [:]
+        var pendingStartedAt = idx[sessionId].map { sessions[$0].pendingToolStartedAt } ?? [:]
 
         guard let handle = try? FileHandle(forReadingFrom: file) else { return }
         defer { try? handle.close() }
@@ -205,7 +207,9 @@ final class SessionStore: ObservableObject {
             guard !line.isEmpty, let lineData = line.data(using: .utf8) else { continue }
             guard let parsed = try? decoder.decode(JSONLine.self, from: lineData) else { continue }
             newCount += 1
+            var lineDate: Date?
             if let ts = parsed.timestamp, let date = iso.date(from: ts) {
+                lineDate = date
                 if latestTimestamp == nil || date > latestTimestamp! { latestTimestamp = date }
             }
             if let t = parsed.type, !t.isEmpty { latestType = t }
@@ -214,6 +218,24 @@ final class SessionStore: ObservableObject {
             if let b = parsed.gitBranch { gitBranch = b }
             if let u = parsed.message?.usage {
                 addedUsage = addedUsage + u.asTokenUsage
+            }
+            // Track tool calls/results
+            if let blocks = parsed.message?.content {
+                for block in blocks {
+                    switch block.type {
+                    case "tool_use":
+                        if let id = block.id, let name = block.name {
+                            pendingTools[id] = name
+                            pendingStartedAt[id] = lineDate ?? Date()
+                        }
+                    case "tool_result":
+                        if let id = block.tool_use_id {
+                            pendingTools.removeValue(forKey: id)
+                            pendingStartedAt.removeValue(forKey: id)
+                        }
+                    default: break
+                    }
+                }
             }
         }
 
@@ -229,6 +251,15 @@ final class SessionStore: ObservableObject {
         }
         let newOffset = existingOffset + completeLength
 
+        // Safety prune: any pending tool >10 min old is assumed completed.
+        // Guards against silent tool_result drops accumulating forever.
+        let toolTTL: TimeInterval = 600
+        let now = Date()
+        for (id, startedAt) in pendingStartedAt where now.timeIntervalSince(startedAt) > toolTTL {
+            pendingTools.removeValue(forKey: id)
+            pendingStartedAt.removeValue(forKey: id)
+        }
+
         if let i = idx[sessionId] {
             if let ts = latestTimestamp { sessions[i].lastActivity = ts }
             if !latestType.isEmpty { sessions[i].lastEventType = latestType }
@@ -238,8 +269,10 @@ final class SessionStore: ObservableObject {
             sessions[i].fileOffset = newOffset
             sessions[i].messageCount = existingCount + newCount
             sessions[i].usage = existingUsage + addedUsage
+            sessions[i].pendingTools = pendingTools
+            sessions[i].pendingToolStartedAt = pendingStartedAt
         } else {
-            let s = Session(
+            var s = Session(
                 id: sessionId,
                 cwd: cwd,
                 model: model,
@@ -251,6 +284,8 @@ final class SessionStore: ObservableObject {
                 messageCount: newCount,
                 usage: addedUsage
             )
+            s.pendingTools = pendingTools
+            s.pendingToolStartedAt = pendingStartedAt
             sessions.append(s)
             idx[sessionId] = sessions.count - 1
         }

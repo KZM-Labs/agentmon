@@ -316,6 +316,7 @@ struct SessionRow: View {
         if let m = session.model { parts.append(shortModel(m)) }
         parts.append(session.displayCwd)
         if let b = session.gitBranch, !b.isEmpty { parts.append("(\(b))") }
+        if let tool = session.currentTool { parts.append("→ \(tool)") }
         return parts.joined(separator: " · ")
     }
 
