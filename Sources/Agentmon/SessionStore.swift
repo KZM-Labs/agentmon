@@ -5,11 +5,19 @@ import Combine
 final class SessionStore: ObservableObject {
     @Published private(set) var sessions: [Session] = []
     @Published private(set) var lastScan: Date = .distantPast
+    @Published private(set) var lastHookKind: String?    // last hook event name, for footer status
 
     private let projectsDir: URL
     private let fm = FileManager.default
     private let iso = ISO8601DateFormatter()
     private var pollTimer: Timer?
+
+    /// Callback fired when a session transitions to idle past the configured threshold.
+    /// Set by AppDelegate to wire notifications. Only fires once per session-threshold pair.
+    var onIdleAlert: ((Session) -> Void)?
+    private var alertedSessions: Set<String> = []
+
+    var idleThreshold: TimeInterval = 30 * 60  // 30 min default; overwritten from Preferences
 
     init(projectsDir: URL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/projects")) {
         self.projectsDir = projectsDir
@@ -17,11 +25,12 @@ final class SessionStore: ObservableObject {
     }
 
     func start() {
-        // initial scan
         Task { await self.rescan() }
-        // poll every 2s
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.rescan() }
+            Task { @MainActor in
+                await self?.rescan()
+                self?.checkIdleAlerts()
+            }
         }
     }
 
@@ -30,14 +39,21 @@ final class SessionStore: ObservableObject {
         pollTimer = nil
     }
 
-    /// Active or idle (i.e. activity within last 5 min)
+    /// Hook-driven push entry point — immediate rescan.
+    func handleHook(_ event: HookEvent) {
+        lastHookKind = event.kind.rawValue
+        Task { @MainActor in
+            await self.rescan()
+            self.checkIdleAlerts()
+        }
+    }
+
     var liveSessions: [Session] {
         sessions
             .filter { $0.state != .stale }
             .sorted { $0.lastActivity > $1.lastActivity }
     }
 
-    /// Last 24h, excluding live
     var recentSessions: [Session] {
         let cutoff = Date().addingTimeInterval(-86_400)
         return sessions
@@ -47,11 +63,38 @@ final class SessionStore: ObservableObject {
             .map { $0 }
     }
 
+    var totalUsage: TokenUsage {
+        sessions.reduce(TokenUsage()) { $0 + $1.usage }
+    }
+
+    /// Estimated cost across all sessions in the current view, summed per model.
+    var totalCost: Double {
+        sessions.reduce(0) { acc, s in
+            acc + ModelPricing.forModel(s.model).cost(for: s.usage)
+        }
+    }
+
+    private func checkIdleAlerts() {
+        guard let cb = onIdleAlert else { return }
+        let now = Date()
+        for s in sessions {
+            let age = now.timeIntervalSince(s.lastActivity)
+            // Fire when between threshold and threshold+10s, dedupe per session
+            if age >= idleThreshold && age < idleThreshold + 30 && !alertedSessions.contains(s.id) {
+                alertedSessions.insert(s.id)
+                cb(s)
+            }
+            // Reset dedupe if the session becomes active again
+            if age < 30 {
+                alertedSessions.remove(s.id)
+            }
+        }
+    }
+
     private func rescan() async {
         guard let projectDirs = try? fm.contentsOfDirectory(at: projectsDir, includingPropertiesForKeys: [.isDirectoryKey]) else { return }
 
         var updated = sessions
-        // Index by id for O(1) lookup
         var idx: [String: Int] = [:]
         for (i, s) in updated.enumerated() { idx[s.id] = i }
 
@@ -61,12 +104,10 @@ final class SessionStore: ObservableObject {
             guard let files = try? fm.contentsOfDirectory(at: projectDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
 
             for file in files where file.pathExtension == "jsonl" {
-                // Only consider files modified in last 24h to skip ancient logs
                 guard let attrs = try? file.resourceValues(forKeys: [.contentModificationDateKey]),
                       let mtime = attrs.contentModificationDate,
                       Date().timeIntervalSince(mtime) < 86_400 else { continue }
-
-                await ingestFile(file, into: &updated, idx: &idx)
+                ingestFile(file, into: &updated, idx: &idx)
             }
         }
 
@@ -74,29 +115,28 @@ final class SessionStore: ObservableObject {
         lastScan = Date()
     }
 
-    private func ingestFile(_ file: URL, into sessions: inout [Session], idx: inout [String: Int]) async {
+    private func ingestFile(_ file: URL, into sessions: inout [Session], idx: inout [String: Int]) {
         let sessionId = file.deletingPathExtension().lastPathComponent
-
-        // Find existing session for this file (by id) to get offset
         let existingOffset = idx[sessionId].map { sessions[$0].fileOffset } ?? 0
         let existingCount = idx[sessionId].map { sessions[$0].messageCount } ?? 0
+        let existingUsage = idx[sessionId].map { sessions[$0].usage } ?? TokenUsage()
 
         guard let handle = try? FileHandle(forReadingFrom: file) else { return }
         defer { try? handle.close() }
 
         let fileSize = (try? handle.seekToEnd()) ?? 0
-        if fileSize <= existingOffset { return }  // nothing new
+        if fileSize <= existingOffset { return }
 
         try? handle.seek(toOffset: existingOffset)
         guard let data = try? handle.readToEnd() else { return }
         guard let text = String(data: data, encoding: .utf8) else { return }
 
-        // Parse new lines. Last partial line (no trailing \n) is skipped — we'll get it next poll.
         let lines = text.components(separatedBy: "\n")
-        let completeLines = text.hasSuffix("\n") ? lines.dropLast() : lines.dropLast()  // always drop last (either empty or partial)
+        let completeLines = lines.dropLast()  // always skip final (empty or partial)
         guard !completeLines.isEmpty else { return }
 
         var newCount = 0
+        var addedUsage = TokenUsage()
         var latestTimestamp: Date?
         var latestType = ""
         var cwd: String?
@@ -115,25 +155,24 @@ final class SessionStore: ObservableObject {
             if let c = parsed.cwd { cwd = c }
             if let m = parsed.message?.model { model = m }
             if let b = parsed.gitBranch { gitBranch = b }
+            if let u = parsed.message?.usage {
+                addedUsage = addedUsage + u.asTokenUsage
+            }
         }
 
-        // Compute new offset — how much of `data` was complete lines
+        // Compute new offset = existing + length of complete lines
         let completeLength: UInt64
         if text.hasSuffix("\n") {
             completeLength = UInt64(data.count)
+        } else if let lastNL = text.range(of: "\n", options: .backwards) {
+            let idx = text.distance(from: text.startIndex, to: lastNL.upperBound)
+            completeLength = UInt64(idx)
         } else {
-            // Find last newline
-            if let lastNL = text.range(of: "\n", options: .backwards) {
-                let idx = text.distance(from: text.startIndex, to: lastNL.upperBound)
-                completeLength = UInt64(idx)
-            } else {
-                completeLength = 0
-            }
+            completeLength = 0
         }
         let newOffset = existingOffset + completeLength
 
         if let i = idx[sessionId] {
-            // Update existing
             if let ts = latestTimestamp { sessions[i].lastActivity = ts }
             if !latestType.isEmpty { sessions[i].lastEventType = latestType }
             if let c = cwd { sessions[i].cwd = c }
@@ -141,8 +180,8 @@ final class SessionStore: ObservableObject {
             if let b = gitBranch { sessions[i].gitBranch = b }
             sessions[i].fileOffset = newOffset
             sessions[i].messageCount = existingCount + newCount
+            sessions[i].usage = existingUsage + addedUsage
         } else {
-            // Need at least a timestamp to insert
             let s = Session(
                 id: sessionId,
                 cwd: cwd,
@@ -152,7 +191,8 @@ final class SessionStore: ObservableObject {
                 lastEventType: latestType.isEmpty ? "unknown" : latestType,
                 filePath: file.path,
                 fileOffset: newOffset,
-                messageCount: newCount
+                messageCount: newCount,
+                usage: addedUsage
             )
             sessions.append(s)
             idx[sessionId] = sessions.count - 1

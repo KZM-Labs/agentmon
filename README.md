@@ -62,15 +62,26 @@ SessionStore (polls every 2s, tracks per-file offset)
 - [x] Click to resume in Terminal
 - [x] Self-contained `.app` bundle, ad-hoc signed
 
-## v0.2+ roadmap
+## v0.2 scope (shipped)
 
-- [ ] Hook-driven push events (replace 2s poll for near-instant updates) — `HookInstaller.swift` is the entry point
-- [ ] Notifications on long-idle sessions ("session idle 30 min — kill?")
-- [ ] Token/cost rollups from `usage` blocks
+- [x] Hook-driven push events — `HookServer` on `127.0.0.1:7842`, loopback-only with origin check, ~50ms perceived latency
+- [x] `HookInstaller` wired to Preferences pane (Install / Uninstall buttons, `.bak` backup of `settings.json`)
+- [x] Idle-session notifications via `UNUserNotificationCenter`, deduped per session, threshold configurable 5–120 min
+- [x] Token & cost rollups — parses `usage` blocks, displays per-session and total in footer
+- [x] Preferences pane — `UserDefaults`-backed, idle threshold slider, notifications toggle, cost-display toggle
+
+### Security model
+
+The hook server binds to all interfaces because `NWListener` doesn't expose a bind-address parameter. We compensate with a **per-connection origin check** in `HookServer.handle()` — non-loopback peers are rejected before any data is read. Payloads are validated as JSON and only `hook_event_name` / `session_id` / `transcript_path` / `cwd` / `message` are extracted — no commands are executed, no files are read based on payload contents beyond the existing `~/.claude/projects/` scan.
+
+## v0.3+ roadmap
+
 - [ ] Per-project filtering toggles in Preferences
-- [ ] Astro companion dashboard for big-screen view (same data source)
+- [ ] Astro companion dashboard for big-screen view (same data source over `:7842`)
 - [ ] Spotlight integration for session search
 - [ ] Focus mode — auto-pause notifications for non-active projects
+- [ ] Persist token rollups across restarts (currently rebuilt from file offsets)
+- [ ] Sparkline of activity over time per session
 
 ## Requirements
 
