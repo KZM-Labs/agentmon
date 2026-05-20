@@ -196,6 +196,15 @@ struct PreferencesPane: View {
                         .controlSize(.small)
                     }
                 }
+                HStack {
+                    Button("Forget projects idle >7d") {
+                        let n = store.forgetSessionsOlderThan(days: 7)
+                        hookStatus = "Forgot \(n) session\(n == 1 ? "" : "s")."
+                    }
+                    .controlSize(.small)
+                    Spacer()
+                }
+                .padding(.top, 4)
             }
         }
     }
@@ -295,9 +304,10 @@ struct SessionRow: View {
 
     private var stateColor: Color {
         switch session.state {
-        case .active: return .green
-        case .idle:   return .yellow
-        case .stale:  return .gray
+        case .active:  return .green
+        case .waiting: return .blue
+        case .idle:    return .yellow
+        case .stale:   return .gray
         }
     }
 

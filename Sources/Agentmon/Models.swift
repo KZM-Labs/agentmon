@@ -1,8 +1,9 @@
 import Foundation
 
 enum SessionState: String {
-    case active   // activity within last 30s
-    case idle     // 30s–5min
+    case active   // recent activity, assistant is working
+    case waiting  // assistant finished, awaiting user input
+    case idle     // 30s–5min with no clear waiting signal
     case stale    // >5min but <24h
 }
 
@@ -38,6 +39,12 @@ struct Session: Identifiable, Equatable, Codable {
 
     var state: SessionState {
         let age = Date().timeIntervalSince(lastActivity)
+        // assistant finished its turn + a few seconds gone by = waiting on user.
+        // The harness writes the user's next message immediately on send, so a
+        // sustained assistant-typed tail means the user hasn't replied yet.
+        if lastEventType == "assistant" && age >= 5 && age < 1_800 {
+            return .waiting
+        }
         if age < 30 { return .active }
         if age < 300 { return .idle }
         return .stale

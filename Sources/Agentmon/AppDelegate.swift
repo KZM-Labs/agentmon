@@ -76,34 +76,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusBar() {
         let active = store.liveSessions.filter { $0.state == .active }.count
+        let waiting = store.liveSessions.filter { $0.state == .waiting }.count
         let idle = store.liveSessions.filter { $0.state == .idle }.count
-        let total = active + idle
+        let total = active + waiting + idle
 
         guard let button = statusItem.button else { return }
 
+        // Priority: waiting (you need to do something) > active (it's working) > idle
         let symbol: String
-        if active > 0 {
+        let color: NSColor
+        if waiting > 0 {
             symbol = "circle.fill"
+            color = .systemBlue
+        } else if active > 0 {
+            symbol = "circle.fill"
+            color = .systemGreen
         } else if idle > 0 {
             symbol = "circle.dotted"
+            color = .systemYellow
         } else {
             symbol = "circle"
+            color = .secondaryLabelColor
         }
 
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
-            .applying(.init(paletteColors: [statusColor(active: active, idle: idle)]))
+            .applying(.init(paletteColors: [color]))
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Agentmon")?
             .withSymbolConfiguration(config)
 
         button.image = image
         button.imagePosition = total > 0 ? .imageLeading : .imageOnly
         button.title = total > 0 ? "  \(total)" : ""
-    }
-
-    private func statusColor(active: Int, idle: Int) -> NSColor {
-        if active > 0 { return .systemGreen }
-        if idle > 0 { return .systemYellow }
-        return .secondaryLabelColor
     }
 
     private func deliverIdleNotification(for session: Session) {

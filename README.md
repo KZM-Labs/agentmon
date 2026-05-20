@@ -74,14 +74,35 @@ SessionStore (polls every 2s, tracks per-file offset)
 
 The hook server binds to all interfaces because `NWListener` doesn't expose a bind-address parameter. We compensate with a **per-connection origin check** in `HookServer.handle()` — non-loopback peers are rejected before any data is read. Payloads are validated as JSON and only `hook_event_name` / `session_id` / `transcript_path` / `cwd` / `message` are extracted — no commands are executed, no files are read based on payload contents beyond the existing `~/.claude/projects/` scan.
 
-## v0.3+ roadmap
+## v0.3 scope (shipped)
 
-- [ ] Per-project filtering toggles in Preferences
+- [x] State persistence — `~/Library/Application Support/Agentmon/state.json` written on rescan, restored on startup
+- [x] Per-project filtering toggles — UserDefaults-backed mute set; filters menu, recent list, and notifications
+
+## v0.4 scope (shipped)
+
+- [x] **"Waiting on you" state** — when the assistant has finished and the last typed turn is theirs, the session flips to blue. Floats to the top of ACTIVE. Status bar icon turns blue if any session is waiting.
+- [x] **"Forget projects idle >7d"** — one-click in Preferences to drop stale sessions and clean up the mute list.
+
+## State machine
+
+| State | Color | Meaning |
+|---|---|---|
+| `active` | green | recent activity, assistant is working |
+| `waiting` | blue | assistant finished; you need to type next |
+| `idle` | yellow | 30s–5min with no clear waiting signal |
+| `stale` | gray | >5min, listed under RECENT for 24h |
+
+Status bar icon priority: `waiting` > `active` > `idle`. The blue dot is the "you have work to do" signal.
+
+## v0.5+ roadmap
+
+- [ ] Show current tool name (parse `tool_use` block from last assistant message)
+- [ ] Cross-project daily budget alert ("$20 spent today across all sessions")
 - [ ] Astro companion dashboard for big-screen view (same data source over `:7842`)
 - [ ] Spotlight integration for session search
-- [ ] Focus mode — auto-pause notifications for non-active projects
-- [ ] Persist token rollups across restarts (currently rebuilt from file offsets)
-- [ ] Sparkline of activity over time per session
+- [ ] Activity sparkline per session
+- [ ] Detect "stuck on tool" — assistant called a tool that's never returned
 
 ## Requirements
 

@@ -78,7 +78,12 @@ final class SessionStore: ObservableObject {
     var liveSessions: [Session] {
         sessions
             .filter { $0.state != .stale && !Preferences.shared.isMuted($0.cwd) }
-            .sorted { $0.lastActivity > $1.lastActivity }
+            .sorted { lhs, rhs in
+                // Waiting sessions float to the top (they need user attention)
+                if lhs.state == .waiting && rhs.state != .waiting { return true }
+                if rhs.state == .waiting && lhs.state != .waiting { return false }
+                return lhs.lastActivity > rhs.lastActivity
+            }
     }
 
     var recentSessions: [Session] {
@@ -94,6 +99,26 @@ final class SessionStore: ObservableObject {
     var knownProjects: [String] {
         let cwds = Set(sessions.compactMap { $0.cwd })
         return cwds.sorted()
+    }
+
+    /// Drop sessions older than `cutoff` days. Also prunes the mute list for any
+    /// cwd that no longer has any session. Returns the number of sessions removed.
+    @discardableResult
+    func forgetSessionsOlderThan(days: Int) -> Int {
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        let before = sessions.count
+        sessions.removeAll { $0.lastActivity < cutoff }
+        let after = sessions.count
+
+        // Drop muted entries whose project no longer has any live record
+        let liveCwds = Set(sessions.compactMap { $0.cwd })
+        let staleMutes = Preferences.shared.mutedProjects.subtracting(liveCwds)
+        for m in staleMutes {
+            Preferences.shared.mutedProjects.remove(m)
+        }
+
+        persistState()
+        return before - after
     }
 
     var totalUsage: TokenUsage {
